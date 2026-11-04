@@ -1,0 +1,11 @@
+.git
+.github
+**/node_modules
+**/__pycache__
+**/*.pyc
+.venv
+venv
+evaluation
+curated/data
+qdrant_storage
+eval
