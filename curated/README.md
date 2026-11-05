@@ -94,7 +94,7 @@ cd curated
 ./deploy.sh          # 生成 .env → build → up -d → 等健康 → 冒烟测试
 ```
 
-分步子命令：`./deploy.sh env | up | smoke | down | save FILE | load FILE`。
+分步子命令：`./deploy.sh env | up | pull | smoke | down | save FILE | load FILE`。
 
 `env` 不需要 Docker，只需要 `openssl` 与 `curl`：它从 `.env.example` 生成 `.env`（权限 `600`，三个随机密钥），核对无残留 `replace_me` 后建好 `data/` 三个子目录。**密钥只落 `.env`，脚本从不打印它们。**
 
@@ -147,6 +147,68 @@ cd curated
 **B. 目标机有网络**：拷**整个仓库**（至少带 `mem0/`、`pyproject.toml`、`curated/`），在目标机 `./deploy.sh up` 现场构建。
 
 `data/` 里是全部状态：`qdrant/`（向量+payload）、`history/`（审计链）、`fastembed/`（模型缓存）。`data/` 与 `.env` 都在 `.gitignore` 里——迁移走文件系统，不要提交，也不要把密钥贴进聊天记录。
+
+### GitHub Actions 自动部署（CD）
+
+[`.github/workflows/curated-cd.yml`](../.github/workflows/curated-cd.yml) 把「构建」和「运行」分开：runner 上构建镜像并推到镜像仓库，服务器只 `docker pull` + `docker compose up -d --no-build`。2 核 2G 的轻量服务器因此不用装编译工具链、不用连 PyPI，也不会倒在 `pip install` 这一步；拉取失败时旧容器保持运行。
+
+**服务器一次性准备**
+
+```bash
+# Docker Engine + compose 插件（get.docker.com 的阿里云镜像源）
+curl -fsSL https://get.docker.com | sudo bash -s docker --mirror Aliyun
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"          # 重新登录后生效
+
+# Docker Hub 直连不稳定，qdrant 官方镜像走镜像站；预拉一次，别等部署时才发现
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{"registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1ms.run"]}
+EOF
+sudo systemctl restart docker
+docker pull qdrant/qdrant:v1.12.4
+```
+
+部署目录不用预建：workflow 会 `mkdir -p`，并把 `docker-compose.yml`、`deploy.sh`、`.env.example` 传上去。第一次 `./deploy.sh pull` 发现没有 `.env` 会自动生成三个随机密钥（只落盘、不打印），之后每次部署都不覆盖它。取密钥：`grep '^CURATOR_API_KEYS=' /opt/mem0-curated/.env`。
+
+**GitHub 仓库配置**（Settings → Secrets and variables → Actions）
+
+| 类型 | 名称 | 必填 | 说明 |
+|---|---|---|---|
+| Secret | `DEPLOY_HOST` | ✅ | 服务器公网 IP 或域名 |
+| Secret | `DEPLOY_USER` | ✅ | SSH 用户，需要在 `docker` 组里 |
+| Secret | `DEPLOY_SSH_KEY` | ✅ | 部署专用私钥，不要复用个人密钥 |
+| Secret | `DEPLOY_PORT` | — | SSH 端口，默认 22 |
+| Secret | `GHCR_PULL_TOKEN` | — | 仅当 GHCR 包设为私有：需要 `read:packages` 的 PAT |
+| Variable | `DEPLOY_PATH` | — | 部署目录，默认 `/opt/mem0-curated` |
+
+公钥放服务器：`ssh-copy-id -i deploy_key.pub user@host`。
+
+**触发方式**
+
+- 推到 `main`，且改动落在 `curated/`、`mem0/`、`pyproject.toml`、`poetry.lock` 时自动执行
+- Actions → **Curated CD** → Run workflow，可选分支或标签；feature 分支也能手动部署
+- 固定 concurrency group，两次部署不会交叉执行
+
+首轮要拉 qdrant、应用镜像并下载 embedder 模型，留足 10 分钟；网络受限时先往服务器 `.env` 加 `HF_ENDPOINT=https://hf-mirror.com`。`deploy.sh pull` 最后会等网关健康，失败时打印后端日志并以非零码退出。
+
+**回滚**
+
+镜像按 git SHA 打标签，回滚不用重建：
+
+```bash
+cd /opt/mem0-curated
+MEM0_CURATED_IMAGE=ghcr.io/<owner>/mem0-curated:<old-sha> ./deploy.sh pull
+```
+
+**换成阿里云 ACR（国内拉取更快）**
+
+在 ACR 建好仓库后，设置 Variable `CURATED_IMAGE=registry.cn-hangzhou.aliyuncs.com/<namespace>/mem0-curated`、`CURATED_REGISTRY_USER=<用户名>`，Secret `CURATED_REGISTRY_TOKEN=<密码>`。workflow 会改推 ACR、并在服务器上 `docker login`，其余流程不变。
+
+**安全边界**
+
+- `8787` 是 Worker / Curator 的唯一入口，靠 API key 鉴权；云服务器安全组建议只放行 Agent 所在网段。
+- `8788`（dashboard）在服务器上只绑回环地址，看板走隧道访问：`ssh -L 8788:127.0.0.1:8788 user@host`，然后打开 `http://127.0.0.1:8788`。
+- `.env` 只在服务器生成；workflow 只上传 `.env.example`，任何密钥都不经过 GitHub。
 
 ## 6. 接口
 

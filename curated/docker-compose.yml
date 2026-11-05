@@ -13,9 +13,10 @@ services:
     build:
       context: ..
       dockerfile: curated/Dockerfile
-    # One image, two processes: the gateway is the same code with a different command.
-    # A fixed tag is what makes `docker save` for an offline host reproducible.
-    image: mem0-curated:1.0.0
+    # One image, several processes: gateway and dashboard are the same code with a
+    # different command. CI overrides MEM0_CURATED_IMAGE with the SHA tag it just
+    # pushed; the fixed default keeps `docker save` reproducible on an offline host.
+    image: ${MEM0_CURATED_IMAGE:-mem0-curated:1.0.0}
     restart: unless-stopped
     command: ["uvicorn", "curated.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -53,7 +54,7 @@ services:
   gateway:
     # No build here on purpose: `depends_on` above builds the shared image first, so the
     # Dockerfile is compiled exactly once per deploy.
-    image: mem0-curated:1.0.0
+    image: ${MEM0_CURATED_IMAGE:-mem0-curated:1.0.0}
     restart: unless-stopped
     command: ["uvicorn", "curated.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -75,7 +76,7 @@ services:
       - curated_network
 
   dashboard:
-    image: mem0-curated:1.0.0
+    image: ${MEM0_CURATED_IMAGE:-mem0-curated:1.0.0}
     restart: unless-stopped
     command: ["uvicorn", "curated.dashboard.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:

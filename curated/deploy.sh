@@ -4,18 +4,20 @@
 #   ./deploy.sh            env + build + up -d + wait for health + smoke test
 #   ./deploy.sh env        only make sure .env exists with real secrets (needs no Docker)
 #   ./deploy.sh up         build and start
+#   ./deploy.sh pull       pull MEM0_CURATED_IMAGE and restart without building (CI/CD)
 #   ./deploy.sh smoke      wait for health, then check that roles are enforced
 #   ./deploy.sh down       stop (./data is left alone)
 #   ./deploy.sh save FILE  bundle every image for an offline host
 #   ./deploy.sh load FILE  unpack them there
 #
-# Set HEALTH_WAIT_SECONDS to raise the startup budget when the embedder model is slow.
+# Set MEM0_CURATED_IMAGE to deploy a registry image, set HEALTH_WAIT_SECONDS to raise
+# the startup budget when the embedder model is slow.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-IMAGE="mem0-curated:1.0.0"
+IMAGE="${MEM0_CURATED_IMAGE:-mem0-curated:1.0.0}"
 QDRANT_IMAGE="qdrant/qdrant:v1.12.4"
 GATEWAY="http://127.0.0.1:8787"
 DASHBOARD="http://127.0.0.1:8788"
@@ -177,6 +179,18 @@ run_up() {
   echo "containers: $($COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null | tr '\n' ';' || true)"
 }
 
+# Used by CI: the image was built and pushed by a runner, so this host only pulls.
+# Pulling first means a failed pull (registry down, bad tag) leaves the old containers running.
+run_pull() {
+  require_daemon
+  ensure_env
+  [[ -n "${MEM0_CURATED_IMAGE:-}" ]] || die "MEM0_CURATED_IMAGE is required, e.g. ghcr.io/owner/mem0-curated:<sha>."
+  docker pull "$IMAGE"
+  $COMPOSE up -d --no-build
+  echo "containers: $($COMPOSE ps --format '{{.Name}} {{.Status}}' 2>/dev/null | tr '\n' ';' || true)"
+  wait_healthy
+}
+
 case "${1:-all}" in
   all)
     ensure_env
@@ -189,9 +203,18 @@ case "${1:-all}" in
     ensure_env
     ;;
   up)
-    require_daemon
-    ensure_env
-    run_up
+    # A registry image cannot be built from the deploy directory (no source tree there),
+    # so `up` follows the same pull-then-start path as CI when one is requested.
+    if [[ -n "${MEM0_CURATED_IMAGE:-}" ]]; then
+      run_pull
+    else
+      require_daemon
+      ensure_env
+      run_up
+    fi
+    ;;
+  pull)
+    run_pull
     ;;
   smoke)
     wait_healthy
