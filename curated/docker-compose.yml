@@ -13,6 +13,9 @@ services:
     build:
       context: ..
       dockerfile: curated/Dockerfile
+    # One image, two processes: the gateway is the same code with a different command.
+    # A fixed tag is what makes `docker save` for an offline host reproducible.
+    image: mem0-curated:1.0.0
     restart: unless-stopped
     command: ["uvicorn", "curated.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -48,9 +51,9 @@ services:
       - curated_network
 
   gateway:
-    build:
-      context: ..
-      dockerfile: curated/Dockerfile
+    # No build here on purpose: `depends_on` above builds the shared image first, so the
+    # Dockerfile is compiled exactly once per deploy.
+    image: mem0-curated:1.0.0
     restart: unless-stopped
     command: ["uvicorn", "curated.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -65,6 +68,32 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - curated_network
+
+  dashboard:
+    image: mem0-curated:1.0.0
+    restart: unless-stopped
+    command: ["uvicorn", "curated.dashboard.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      # The curator key stays in this process. The browser talks to the dashboard, never to
+      # the gateway, so no key ever reaches page source or localStorage.
+      - CURATED_GATEWAY_URL=http://gateway:8000
+      - CURATED_API_KEYS=${CURATOR_API_KEYS:?CURATOR_API_KEYS must be set in curated/.env}
+      - CURATED_PROJECT_ID=${CURATED_PROJECT_ID:-default}
+    # Loopback only: the admin console can write, so it must not be reachable from the LAN.
+    ports:
+      - "127.0.0.1:8788:8000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/config')"]
       interval: 15s
       timeout: 5s
       retries: 5

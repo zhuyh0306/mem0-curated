@@ -56,6 +56,8 @@
 
 鉴权：`X-API-Key: <curator key>`，Base URL 通常是 `http://localhost:8787`。
 
+走 MCP 时同一套动作对应 `dedup_check` / `search_experiences` / `record_experience` / `deprecate_experience` 四个 tool，`project_id` 已由 `CURATED_PROJECT_ID` 固定、不再作为参数出现——下面示例里的 `"project_id"` 请照原样理解为你已经站在哪个项目上。
+
 1. **去重检查** —— 先问库里有没有等价经验：
    ```bash
    POST /v1/experiences/dedup-check

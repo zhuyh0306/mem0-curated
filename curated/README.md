@@ -66,52 +66,87 @@ Worker Agent ──X-API-Key(worker)──▶ gateway ──▶ mem0-curated ─
   ↓                                        │
 Curator Agent ─X-API-Key(curator)──────────┘
    降噪 → 提炼 Schema JSON → dedup/冲突检查 → 写入
+
+运维看板 127.0.0.1:8788 ─X-API-Key(curator)─▶ gateway   （key 只在服务端）
 ```
 
-三个容器：
+四个容器：
 
 | 服务 | 作用 | 端口 |
 |---|---|---|
 | `qdrant` | 向量库，数据挂 `./data/qdrant` | 仅内网 |
 | `mem0-curated` | FastAPI + mem0 `Memory`，`add(infer=False)` 原样存储 | 仅内网，**不映射宿主机** |
 | `gateway` | 角色鉴权 + method/path allowlist + 反向代理 | `8787` |
+| `dashboard` | 运维看板，持有 curator key 并逐次调用 gateway | `127.0.0.1:8788` |
 
 `mem0-curated` 不 publish 端口，Worker 在网络上到不了后端；gateway 再叠加 allowlist；后端另有 `X-Internal-Token` 校验。三层独立，任一层配置失误都不会让 Worker 写进去。
+
+`dashboard` 是第四个进程，同样复用这一个镜像。它把 curator key 留在进程里，浏览器只和它通信，所以页面源码、localStorage、网络面板里都不会出现密钥；写操作额外校验 `Origin`，拒绝跨站请求。端口只绑回环地址，局域网访问不到。
 
 单镜像双进程：同一个 Dockerfile，两个 service 用不同 `command` 起 `curated.app.main` 与 `curated.gateway.main`。
 
 ## 5. 部署
 
+一个命令，从零到冒烟通过：
+
 ```bash
 cd curated
-cp .env.example .env          # 填入随机 key：openssl rand -base64 32
+./deploy.sh          # 生成 .env → build → up -d → 等健康 → 冒烟测试
+```
+
+分步子命令：`./deploy.sh env | up | smoke | down | save FILE | load FILE`。
+
+`env` 不需要 Docker，只需要 `openssl` 与 `curl`：它从 `.env.example` 生成 `.env`（权限 `600`，三个随机密钥），核对无残留 `replace_me` 后建好 `data/` 三个子目录。**密钥只落 `.env`，脚本从不打印它们。**
+
+`smoke` 是冒烟测试，用 `.env` 里的真实密钥逐条断言权限边界：无 key 探活 200、错 key 401、Worker 写入 403、Worker 检索 200、Curator 写入拿到 id、随即用 deprecate 退役这条自测记录（设计上没有 DELETE，不退役就会污染真实检索），最后验一个无关 project 读到自己的空作用域。跑两遍都应通过。
+
+裸命令等价路径：
+
+```bash
+cp .env.example .env && $EDITOR .env      # 三个密钥都换成随机值
 docker compose up -d --build
 curl -s localhost:8787/health
 ```
 
-首次启动会拉取 embedder 模型到 `./data/fastembed`（默认 `BAAI/bge-small-en-v1.5`，384 维），需要一次网络。之后完全离线。
+首次启动会拉取 embedder 模型到 `./data/fastembed`（默认 `BAAI/bge-small-en-v1.5`，384 维），需要一次网络。之后完全离线。访问 HuggingFace 受限时在 `.env` 里加一行镜像即可：`HF_ENDPOINT=https://hf-mirror.com`（`env_file` 会把它带进容器）。
+
+模型下载失败**不会让服务起不来**：mem0 会退回纯稠密向量检索（BM25 关键词通道关闭），代价是每次模型解析要走约 40 秒的下载重试退避。日志里看到 `Failed to load BM25 encoder` 属正常降级，不是崩溃。
 
 ### 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `WORKER_API_KEYS` / `CURATOR_API_KEYS` | — | 逗号分隔。同一个 key 误填进两个列表时按 **Worker** 处理（降级而非提权） |
-| `INTERNAL_TOKEN` | — | gateway ↔ 后端共享密钥，不可下发给 Worker |
+| `INTERNAL_TOKEN` | — | gateway ↔ 后端共享密钥，不可下发给 Worker。缺失时后端一律 401（fail-closed） |
+| `HF_ENDPOINT` | — | 直连 huggingface.co 受限时设 `https://hf-mirror.com` |
 | `QDRANT_COLLECTION` | `experiences` | 集合名 |
 | `EMBEDDER_PROVIDER` | `fastembed` | 可切 `openai`（需 `OPENAI_API_KEY`） |
 | `EMBEDDER_MODEL` / `EMBEDDER_DIMS` | `BAAI/bge-small-en-v1.5` / `384` | **两者必须匹配**，启动时会做维度探针校验，不匹配立即报错 |
 
 > `EMBEDDER_DIMS` 必须手填：mem0 不会把 embedder 输出维度同步到 vector store 配置，漏填会导致建出错误维度的集合。
 
+> 后端容器**没有 `ports`**，只有 `expose: 8000`，宿主上唯一入口是 gateway 的 `8787`。直连后端会因缺少 `X-Internal-Token` 被拒。
+
 ### 迁移到另一台机器
 
+镜像的 build context 是**仓库根**（Dockerfile 要 `mem0/` 和 `pyproject.toml`），所以「只拷 `curated/` 目录」在目标机上构建不出来。两条可行路径：
+
+**A. 离线机 —— 传镜像，不构建（推荐）**
+
 ```bash
-docker compose down
-# 整个 curated/ 目录（含 data/）拷走；目标机放回原位
-docker compose up -d
+# 源机：两个镜像一起打包，目标机同样拉不到 qdrant 官方镜像
+./deploy.sh save /tmp/curated-images.tar
+# 拷 /tmp/curated-images.tar + 整个 curated/ 目录（含 data/ 与 .env）
+# 目标机
+cd curated
+./deploy.sh load /tmp/curated-images.tar
+./deploy.sh up        # 检测到镜像已存在会跳过 build
+./deploy.sh smoke
 ```
 
-`data/` 里是三项全部状态：`qdrant/`（向量+payload）、`history/`（审计链）、`fastembed/`（模型缓存）。
+**B. 目标机有网络**：拷**整个仓库**（至少带 `mem0/`、`pyproject.toml`、`curated/`），在目标机 `./deploy.sh up` 现场构建。
+
+`data/` 里是全部状态：`qdrant/`（向量+payload）、`history/`（审计链）、`fastembed/`（模型缓存）。`data/` 与 `.env` 都在 `.gitignore` 里——迁移走文件系统，不要提交，也不要把密钥贴进聊天记录。
 
 ## 6. 接口
 
@@ -134,6 +169,73 @@ docker compose up -d
 
 检索排序：`score × (0.5 + 0.5 × confidence)`，`created_at` 做 tie-break。置信度低的经验降权但不被埋掉。
 
+### 运维看板（dashboard）
+
+`http://127.0.0.1:8788`，随 `./deploy.sh up` 一起启动。
+
+| 能力 | 说明 |
+|---|---|
+| 浏览与统计 | 记录数、生效/废弃数、标签分布，按标签筛选 |
+| 语义搜索 | 走 `/v1/experiences/search`，与 Agent 检索同一套排序 |
+| 详情 | 完整记录、失败尝试、`supersedes` / `superseded_by` 链 |
+| 新建 | 表单按 Schema 校验，保存前自动查重；发现相似条目需二次确认 |
+| 废弃 | 填原因，可指向替代记录；不提供删除，治理模型不变 |
+
+看板默认打开 `CURATED_PROJECT_ID` 指定的项目，右上角可切换。它持有 curator key，因此**只绑定回环地址**，写请求还会校验 `Origin`。需要多人访问时不要直接把端口暴露出去，应放在带认证的反向代理之后。
+
+### 接入编码 Agent（MCP）
+
+`curated/mcp/server.py` 是一个 stdio MCP 服务，把网关的 4 个动作暴露成 tool：`search_experiences` / `dedup_check`（只读）、`record_experience` / `deprecate_experience`（写）。它是手写 JSON-RPC（协议 `2024-11-05`），只用标准库 + `httpx`，**不引入 MCP SDK**。
+
+桥本身不含任何权限判断——每次调用都带着一个角色的 key 走网关，所以「Worker 永不能写」仍然是网关的属性。给 worker key 调 `record_experience`，拿到的是网关原文 `role 'worker' is not allowed to POST /v1/experiences`，模型能读懂并就此收手。
+
+| 环境变量 | 必填 | 说明 |
+|---|---|---|
+| `CURATED_GATEWAY_URL` | 否（默认 `http://127.0.0.1:8787`） | 只指向网关，绝不指向后端 |
+| `CURATED_API_KEY` | 是 | 决定这次会话是只读还是可写 |
+| `CURATED_PROJECT_ID` | 是 | 作用域。**不是 tool 参数**，模型无法把读写挪到别的项目上 |
+
+后两者缺一即启动失败（退出码 2，原因写进 stderr），不会留一个每次都报错的僵尸进程。宿主 Python 需要能 `import httpx`。
+
+一个 workspace 对应一个 `CURATED_PROJECT_ID`，因此按用途配成两个条目：日常编码会话挂 worker key，提纯会话单独挂 curator key。
+
+Qoder Desktop —— 入口 左侧栏 **Extensions → Connectors → Add Connector → Add custom MCP**，或直接写 `~/.qoder/settings.json`（CN 版为 `~/.qoder-cn/settings.json`）：
+
+```json
+{
+  "mcpServers": {
+    "curated-read": {
+      "command": "python3",
+      "args": ["-m", "curated.mcp.server"],
+      "cwd": "/绝对路径/mem0-curated",
+      "env": {
+        "CURATED_GATEWAY_URL": "http://127.0.0.1:8787",
+        "CURATED_API_KEY": "<WORKER_KEY>",
+        "CURATED_PROJECT_ID": "my-project"
+      },
+      "timeout": 30000
+    },
+    "curated-curator": {
+      "command": "python3",
+      "args": ["-m", "curated.mcp.server"],
+      "cwd": "/绝对路径/mem0-curated",
+      "env": {
+        "CURATED_API_KEY": "<CURATOR_KEY>",
+        "CURATED_PROJECT_ID": "my-project"
+      },
+      "timeout": 30000
+    }
+  }
+}
+```
+
+`cwd` 必须是绝对路径；`-m` 从该目录解析包，因此不需要额外设 `PYTHONPATH`。`timeout` 单位是毫秒。
+
+CodeBuddy —— IDE 里 侧栏对话面板右上 **CodeBuddy Settings → MCP 标签页** 添加自定义 MCP；CodeBuddy CLI 同样支持 MCP。配置形状与上面一致（`command` / `args` / `env`），只是入口不同。
+
+冷启动后**第一次检索可能超时**：mem0 会惰性加载 BM25 稀疏编码器，模型拉不到时按 3/9/27 秒退避，总时长会盖过网关的 60 秒读超时，Agent 侧表现为一个 504（网关会把上游超时/不可达映射成 504/502，不会抛裸异常）。之后该失败被缓存、不再重复。解法是设 `HF_ENDPOINT=https://hf-mirror.com` 让模型落地，或部署后先手动打一次 `/v1/experiences/search` 预热。
+
+
 ## 7. 示例与测试
 
 ```bash
@@ -144,7 +246,7 @@ pytest tests/curated -q
 ruff check curated tests/curated --line-length 120
 ```
 
-测试用真实 `Memory` + 本地 Qdrant + 打桩 embedder，覆盖 Schema 校验、写入检索、`supersedes` 废弃链路、跨项目拒绝、网关 allowlist。
+测试用真实 `Memory` + 本地 Qdrant + 打桩 embedder，覆盖 Schema 校验、写入检索、`supersedes` 废弃链路、跨项目拒绝、网关 allowlist、转发时 header 剥离与内部 token 注入、上游不可达/超时的 502/504 映射，以及 MCP 桥的协议层与工具层。
 
 ## 8. 排障
 
@@ -152,8 +254,15 @@ ruff check curated tests/curated --line-length 120
 |---|---|
 | 启动即报 `embedding dims mismatch` | `EMBEDDER_DIMS` 与 `EMBEDDER_MODEL` 不匹配 |
 | 首次启动很慢 | 正在下载 embedder 模型到 `data/fastembed` |
+| 日志 `Failed to load BM25 encoder` / `Could not load model Qdrant/bm25` | 拉不到模型，已降级为纯稠密检索（服务照常）。设 `HF_ENDPOINT=https://hf-mirror.com` 后重启 |
+| Agent 侧第一次检索报超时、之后正常 | 冷启动的 BM25 模型下载退避盖过了网关 60s 读超时，见第 6 节「接入编码 Agent（MCP）」 |
+| MCP 条目加了但工具列表是空的 | 宿主 `python3` 里装了吗 `httpx`；`cwd` 是不是绝对路径；key/project 两个变量缺一个它会立刻退出（stderr 有原因） |
 | Worker 收到 403 | 正常。写接口对 Worker 永久关闭 |
+| 容器起不来：`mkdir /Users/xxx/Documents: operation not permitted` | macOS 的 TCC 保护目录，虚拟机里的挂载进程读不到（root 也不行）。给启动 `limactl`/`docker` 的那个 App 授予「完全磁盘访问权」后**完全退出并重开 App**，再 `colima restart` |
+| colima 上配了 `registry-mirrors`，重启后失效 | `colima restart` 会用自己托管的配置覆盖 `/etc/docker/daemon.json`。要么每次重启后重配，要么把镜像先 `./deploy.sh save` 下来用 `load` 恢复 |
 | 收到 401 `Invalid internal token` | gateway 与后端 `INTERNAL_TOKEN` 不一致 |
+| 收到 502 `cannot reach the memory backend` | 后端容器还没 listening（`docker compose up` 的启动窗口）或已崩溃。`docker compose ps` + `docker compose logs mem0-curated` |
+| 收到 504 `did not answer within 60.0s` | 网关 60s 读超时；冷启动模型下载最常见。重试一次，或先预热 |
 | 检索结果里出现已废弃条目 | 说明有绕过本服务直接写库的路径，或 `deprecated` 字段未写入（检查是否有人直接调 mem0 写接口） |
 | 搜不到刚写的条目 | `threshold` 太高，或 `tags` 过滤过窄 |
 
@@ -163,3 +272,5 @@ ruff check curated tests/curated --line-length 120
 - 不提供 `DELETE`/`PUT`：删除会破坏 `supersedes` 链。
 - 只支持单一 embedder 维度；更换模型需重建集合。
 - 未接入 graph memory 与 reranker。
+- MCP 桥按 `2024-11-05` 基线实现，验证方式是子进程 + 手写 JSON-RPC 驱动（协议握手、四个 tool、UTF-8、错误透传全过，并对着容器化 gateway 跑通了「Curator 中文写入 → Worker 中文检索 → dedup → deprecate 后消失」整链路）；**尚未由 Qoder / CodeBuddy 客户端实机连接验证过**，两侧的 mcpServers 片段照各自官方字段写的。
+- compose 里 Qdrant 固定在 `v1.12.4`，而镜像装的 `qdrant-client` 是 1.20，启动会打一条版本兼容性 warning。功能实测正常（payload 过滤、`must_not` 语义都对），但**升这个 pin 之前要重跑一遍 `tests/curated` 和 `./deploy.sh smoke`**——过滤语义靠的是 client/server 对 payload 条件的一致理解。

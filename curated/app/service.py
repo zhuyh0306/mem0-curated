@@ -158,6 +158,26 @@ class ExperienceService:
     def list_memories(self, project_id: str, top_k: int) -> Dict[str, Any]:
         return self.memory.get_all(filters={"user_id": project_id}, top_k=top_k)
 
+    def list_experiences(
+        self,
+        project_id: str,
+        tags: List[str],
+        include_deprecated: bool,
+        limit: int,
+    ) -> List[ExperienceResult]:
+        response = self.memory.get_all(filters={"user_id": project_id}, top_k=limit)
+        wanted = {tag.lower() for tag in tags}
+        results: List[ExperienceResult] = []
+        for item in response.get("results", []):
+            result = _to_result(item)
+            if not include_deprecated and result.deprecated:
+                continue
+            if wanted and not wanted.intersection(result.record.tags):
+                continue
+            results.append(result)
+        results.sort(key=lambda result: result.created_at or "", reverse=True)
+        return results
+
     def get(self, memory_id: str, project_id: str) -> ExperienceResult:
         return _to_result(self._get_scoped(memory_id, project_id))
 

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 UPSTREAM_URL = os.environ.get("UPSTREAM_URL", "http://mem0-curated:8000")
 INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
+UPSTREAM_TIMEOUT_SECONDS = 60.0
 
 _STRIP_REQUEST_HEADERS = {"host", "x-api-key", "x-internal-token", "content-length", "connection"}
 _STRIP_RESPONSE_HEADERS = {
@@ -29,7 +30,7 @@ _client: Optional[httpx.AsyncClient] = None
 def get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(UPSTREAM_TIMEOUT_SECONDS))
     return _client
 
 
@@ -57,13 +58,29 @@ async def proxy(path: str, request: Request):
     }
     headers["x-internal-token"] = INTERNAL_TOKEN
 
-    upstream_response = await get_client().request(
-        request.method,
-        f"{UPSTREAM_URL}{full_path}",
-        content=await request.body(),
-        headers=headers,
-        params=request.query_params.multi_items(),
-    )
+    try:
+        upstream_response = await get_client().request(
+            request.method,
+            f"{UPSTREAM_URL}{full_path}",
+            content=await request.body(),
+            headers=headers,
+            params=request.query_params.multi_items(),
+        )
+    except httpx.TimeoutException:
+        # A cold embedder model or a slow first search lands here; the caller should retry, not abort.
+        logger.error("upstream %s%s timed out after %ss", UPSTREAM_URL, full_path, UPSTREAM_TIMEOUT_SECONDS)
+        return JSONResponse(
+            status_code=504,
+            content={"detail": f"memory backend at {UPSTREAM_URL} did not answer within {UPSTREAM_TIMEOUT_SECONDS}s."},
+        )
+    except httpx.RequestError as exc:
+        # The usual cause is the startup window in `docker compose up`, when the backend container
+        # exists but is not listening yet.
+        logger.error("upstream %s%s unreachable: %s", UPSTREAM_URL, full_path, exc)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"cannot reach the memory backend at {UPSTREAM_URL}: {exc}"},
+        )
 
     response_headers = {
         name: value for name, value in upstream_response.headers.items() if name.lower() not in _STRIP_RESPONSE_HEADERS

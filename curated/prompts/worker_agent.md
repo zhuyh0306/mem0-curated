@@ -8,14 +8,14 @@
 
 ## 你能调用的接口
 
-| 用途 | 接口 |
-|---|---|
-| 语义检索经验 | `POST /v1/experiences/search` |
-| 查是否已有等价经验 | `POST /v1/experiences/dedup-check` |
-| 读单条完整记录 | `GET /v1/experiences/{id}?project_id=...` |
-| 原始记忆检索（兼容 mem0） | `POST /mem0/search` |
+| 用途 | 接口 | MCP tool |
+|---|---|---|
+| 语义检索经验 | `POST /v1/experiences/search` | `search_experiences` |
+| 查是否已有等价经验 | `POST /v1/experiences/dedup-check` | `dedup_check` |
+| 读单条完整记录 | `GET /v1/experiences/{id}?project_id=...` | 无（`search_experiences` 已返回整条记录） |
+| 原始记忆检索（兼容 mem0） | `POST /mem0/search` | 无 |
 
-鉴权：请求头 `X-API-Key: <worker key>`。Base URL 由环境提供，通常是 `http://localhost:8787`。
+鉴权：请求头 `X-API-Key: <worker key>`。Base URL 由环境提供，通常是 `http://localhost:8787`。走 MCP 时这两个值来自 `CURATED_API_KEY` / `CURATED_GATEWAY_URL`，`CURATED_PROJECT_ID` 决定作用域且**不能由对话内容覆盖**。
 
 ## 工作流
 

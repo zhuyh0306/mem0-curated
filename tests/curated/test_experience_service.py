@@ -157,3 +157,28 @@ def test_dedup_check_returns_existing_summary(service: ExperienceService) -> Non
 
     assert [candidate.id for candidate in candidates] == [created["id"]]
     assert candidates[0].summary == make_record().summary
+
+
+def test_list_experiences_filters_tags_and_deprecated(service: ExperienceService) -> None:
+    first = service.create(make_record(), "proj-a")
+    second = service.create(make_record(summary="second", tags=["other"]), "proj-a")
+    retired = service.create(make_record(summary="retired", tags=["legacy"]), "proj-a")
+    service.deprecate(retired["id"], "proj-a", "superseded by a narrower rule")
+
+    active = service.list_experiences("proj-a", [], False, 100)
+    assert {result.id for result in active} == {first["id"], second["id"]}
+
+    everything = service.list_experiences("proj-a", [], True, 100)
+    assert {result.id for result in everything} == {first["id"], second["id"], retired["id"]}
+
+    tagged = service.list_experiences("proj-a", ["legacy"], True, 100)
+    assert [result.id for result in tagged] == [retired["id"]]
+
+
+def test_list_experiences_is_scoped_to_one_project(service: ExperienceService) -> None:
+    service.create(make_record(), "proj-a")
+    service.create(make_record(summary="only in b"), "proj-b")
+
+    results = service.list_experiences("proj-b", [], True, 100)
+
+    assert [result.record.summary for result in results] == ["only in b"]

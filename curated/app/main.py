@@ -1,6 +1,6 @@
 import os
 import secrets
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
@@ -72,6 +72,22 @@ def search_experiences(request: SearchRequest, service: ExperienceService = Depe
 )
 def dedup_check(request: DedupRequest, service: ExperienceService = Depends(get_service)):
     return service.dedup_check(request)
+
+
+@app.get(
+    "/v1/experiences",
+    response_model=list[ExperienceResult],
+    summary="List curated experiences for one project",
+    dependencies=INTERNAL_ONLY,
+)
+def list_experiences(
+    project_id: str = Query(..., min_length=1),
+    tags: Optional[List[str]] = Query(None),
+    include_deprecated: bool = False,
+    limit: int = Query(500, ge=1, le=1000),
+    service: ExperienceService = Depends(get_service),
+):
+    return service.list_experiences(project_id, tags or [], include_deprecated, limit)
 
 
 @app.get(
