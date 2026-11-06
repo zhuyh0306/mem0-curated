@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
 IMAGE="${MEM0_CURATED_IMAGE:-mem0-curated:1.0.0}"
-QDRANT_IMAGE="qdrant/qdrant:v1.12.4"
+QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant:v1.12.4}"
 GATEWAY="http://127.0.0.1:8787"
 DASHBOARD="http://127.0.0.1:8788"
 HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"

@@ -159,14 +159,11 @@ cd curated
 curl -fsSL https://get.docker.com | sudo bash -s docker --mirror Aliyun
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"          # 重新登录后生效
-
-# Docker Hub 直连不稳定，qdrant 官方镜像走镜像站；预拉一次，别等部署时才发现
-sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
-{"registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1ms.run"]}
-EOF
-sudo systemctl restart docker
-docker pull qdrant/qdrant:v1.12.4
 ```
+
+服务器**不需要连 Docker Hub**：CI 会把 qdrant 镜像一起推到 `ghcr.io/<owner>/mem0-curated-qdrant:v1.12.4`，部署时两个镜像都从 GHCR 拉，`docker-compose.yml` 里 qdrant 用 `${QDRANT_IMAGE}` 覆盖。第一次镜像会在 workflow 里自动完成，之后 `docker manifest inspect` 命中就跳过。
+
+新包默认是私有的，二选一：Package settings 里把 `mem0-curated-qdrant` 的可见性改成 Public，或给服务器配 `GHCR_PULL_TOKEN`（workflow 会用它在服务器上 `docker login ghcr.io`）。
 
 部署目录不用预建：workflow 会 `mkdir -p`，并把 `docker-compose.yml`、`deploy.sh`、`.env.example` 传上去。第一次 `./deploy.sh pull` 发现没有 `.env` 会自动生成三个随机密钥（只落盘、不打印），之后每次部署都不覆盖它。取密钥：`grep '^CURATOR_API_KEYS=' /opt/mem0-curated/.env`。
 
@@ -189,7 +186,7 @@ docker pull qdrant/qdrant:v1.12.4
 - Actions → **Curated CD** → Run workflow，可选分支或标签；feature 分支也能手动部署
 - 固定 concurrency group，两次部署不会交叉执行
 
-首轮要拉 qdrant、应用镜像并下载 embedder 模型，留足 10 分钟；网络受限时先往服务器 `.env` 加 `HF_ENDPOINT=https://hf-mirror.com`。`deploy.sh pull` 最后会等网关健康，失败时打印后端日志并以非零码退出。
+首轮要拉两个镜像并下载 embedder 模型，留足 10 分钟；网络受限时先往服务器 `.env` 加 `HF_ENDPOINT=https://hf-mirror.com`。`deploy.sh pull` 最后会等网关健康，失败时打印后端日志并以非零码退出。
 
 **回滚**
 
@@ -197,7 +194,9 @@ docker pull qdrant/qdrant:v1.12.4
 
 ```bash
 cd /opt/mem0-curated
-MEM0_CURATED_IMAGE=ghcr.io/<owner>/mem0-curated:<old-sha> ./deploy.sh pull
+MEM0_CURATED_IMAGE=ghcr.io/<owner>/mem0-curated:<old-sha> \
+QDRANT_IMAGE=ghcr.io/<owner>/mem0-curated-qdrant:v1.12.4 \
+./deploy.sh pull
 ```
 
 **换成阿里云 ACR（国内拉取更快）**

@@ -2,7 +2,9 @@ name: mem0-curated
 
 services:
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # CI mirrors this image next to the curated one so a host that cannot reach
+    # Docker Hub still starts the stack; the default keeps a local `up` unchanged.
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.12.4}
     restart: unless-stopped
     volumes:
       - ./data/qdrant:/qdrant/storage

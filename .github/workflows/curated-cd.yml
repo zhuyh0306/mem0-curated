@@ -4,6 +4,9 @@ name: Curated CD
 # The server never builds anything: `pip install .` is the step most likely to OOM on a
 # 2 vCPU / 2 GB host, and pulling one image is both faster and reversible.
 #
+# qdrant is mirrored into the same registry (`<prefix>/mem0-curated-qdrant:<tag>`) because
+# the deploy host often cannot reach Docker Hub at all. The mirror is skipped once present.
+#
 # Required repository secrets:
 #   DEPLOY_HOST      public IP or DNS name of the server
 #   DEPLOY_USER      SSH user, must be able to run docker
@@ -48,6 +51,7 @@ jobs:
     timeout-minutes: 45
     outputs:
       image: ${{ steps.image.outputs.name }}
+      qdrant: ${{ steps.image.outputs.qdrant }}
       registry: ${{ steps.image.outputs.registry }}
       tag: ${{ steps.image.outputs.tag }}
     steps:
@@ -59,6 +63,7 @@ jobs:
         id: image
         env:
           CUSTOM_IMAGE: ${{ vars.CURATED_IMAGE }}
+          QDRANT_SOURCE: qdrant/qdrant:v1.12.4
         run: |
           set -euo pipefail
           if [ -n "${CUSTOM_IMAGE:-}" ]; then
@@ -70,6 +75,7 @@ jobs:
           tag="$(git rev-parse --short=12 HEAD)"
           {
             echo "name=${name}"
+            echo "qdrant=${name%/*}/mem0-curated-qdrant:${QDRANT_SOURCE##*:}"
             echo "registry=${name%%/*}"
             echo "tag=${tag}"
             echo "tags<<EOF"
@@ -97,6 +103,22 @@ jobs:
           tags: ${{ steps.image.outputs.tags }}
           cache-from: type=gha,scope=curated
           cache-to: type=gha,mode=max,scope=curated
+
+      - name: Mirror qdrant into the same registry
+        env:
+          QDRANT_SOURCE: qdrant/qdrant:v1.12.4
+          QDRANT_TARGET: ${{ steps.image.outputs.qdrant }}
+        run: |
+          set -euo pipefail
+          # The deploy host may not reach Docker Hub at all (it is blocked from mainland
+          # China often enough to matter), so both images must come from one registry.
+          if docker manifest inspect "$QDRANT_TARGET" >/dev/null 2>&1; then
+            echo "$QDRANT_TARGET already exists; nothing to do."
+            exit 0
+          fi
+          docker pull "$QDRANT_SOURCE"
+          docker tag "$QDRANT_SOURCE" "$QDRANT_TARGET"
+          docker push "$QDRANT_TARGET"
 
   deploy:
     name: Roll out over SSH
@@ -180,4 +202,4 @@ jobs:
         run: |
           set -euo pipefail
           path="${DEPLOY_PATH:-/opt/mem0-curated}"
-          ssh deploy "cd '$path' && MEM0_CURATED_IMAGE='${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}' HEALTH_WAIT_SECONDS=600 ./deploy.sh pull"
+          ssh deploy "cd '$path' && MEM0_CURATED_IMAGE='${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}' QDRANT_IMAGE='${{ needs.build.outputs.qdrant }}' HEALTH_WAIT_SECONDS=600 ./deploy.sh pull"
