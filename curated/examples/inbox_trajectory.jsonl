@@ -1,0 +1,8 @@
+{"kind": "meta", "session_id": "cb-demo-0001", "workspace": "/Users/demo/projects/demo-service", "agent": "codebuddy", "started_at": "2026-11-06T09:12:00+08:00"}
+{"kind": "user", "text": "部署脚本把 qdrant 镜像改到 GHCR 之后 smoke 起不来，排查一下"}
+{"kind": "assistant", "text": "先确认 compose 里的镜像 tag 与 deploy.sh 的拉取顺序是否一致"}
+{"kind": "tool", "name": "Bash", "status": "error", "text": "smoke 第 2 步失败：gateway 8 秒超时"}
+{"kind": "tool", "name": "Read", "status": "ok", "text": "compose 里 qdrant 仍是 docker.io 的 tag"}
+{"kind": "assistant", "text": "服务器连不上 Docker Hub，qdrant 必须镜像到 GHCR 并随应用一起拉取；8787 未放行时表现为固定 8 秒超时"}
+{"kind": "tool", "name": "Bash", "status": "ok", "text": "改成 GHCR 地址后 compose up 成功"}
+{"kind": "verification", "text": "./deploy.sh smoke 通过，gateway health 返回 200，连续两次重启后仍通过"}

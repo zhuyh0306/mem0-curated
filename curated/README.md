@@ -292,7 +292,28 @@ Qoder Desktop —— 入口 左侧栏 **Extensions → Connectors → Add Connec
 
 `cwd` 必须是绝对路径；`-m` 从该目录解析包，因此不需要额外设 `PYTHONPATH`。`timeout` 单位是毫秒。
 
-CodeBuddy —— IDE 里 侧栏对话面板右上 **CodeBuddy Settings → MCP 标签页** 添加自定义 MCP；CodeBuddy CLI 同样支持 MCP。配置形状与上面一致（`command` / `args` / `env`），只是入口不同。
+CodeBuddy —— 用户级配置在 `~/.codebuddy/mcp.json`（agent 的 `USER_DATA_DIR_NAME` 就是 `.codebuddy`），形状与上面一致。**编码会话只挂 worker key**；用 `PYTHONPATH` 指向仓库根而不是 `cwd`，这样在任意工作区打开 CodeBuddy 都能 `-m curated.mcp.server`：
+
+```json
+{
+  "mcpServers": {
+    "curated-read": {
+      "command": "/绝对路径/.venvs/mem0-curated-mcp/bin/python",
+      "args": ["-m", "curated.mcp.server"],
+      "env": {
+        "PYTHONPATH": "/绝对路径/mem0-curated",
+        "CURATED_GATEWAY_URL": "http://127.0.0.1:8787",
+        "CURATED_API_KEY": "<WORKER_KEY>",
+        "CURATED_PROJECT_ID": "my-project"
+      }
+    }
+  }
+}
+```
+
+文件权限建议 `600`。改完重启 CodeBuddy（或在 MCP 面板里重连）才会加载；验证方式是让它调一次 `search_experiences`，或按上面的命令手工跑 `initialize` + `tools/list`（应返回 4 个 tool）。需要提纯的会话再单独加一个 `curated-curator` 条目，别和编码会话混在同一个 server 名里。
+
+豆包 PC 版（本机 `Doubao.app` 2.35.4，`DoubaoWork` 同理）—— 入口 左侧「技能·连接器·伙伴」→ 右上「+ 新建」→「新建自定义连接器」，传输类型选 **STDIO**，把上面 CodeBuddy 那组命令、参数、环境变量填进表单。它没有 JSON 入口也没有 `cwd` 字段，所以必须用 `PYTHONPATH` 指向仓库根；连接器跑在豆包的本地 sandbox 里，Python 解释器路径要写 venv 的绝对路径。同样只填 worker key。自定义连接器只在「本地电脑」环境生效，不会同步到云电脑或手机。**尚未实机验证**：入口文案来自官方帮助与第三方接入文档，配完先让它调一次 `search_experiences` 确认工具列表是 4 个。
 
 冷启动后**第一次检索可能超时**：mem0 会惰性加载 BM25 稀疏编码器，模型拉不到时按 3/9/27 秒退避，总时长会盖过网关的 60 秒读超时，Agent 侧表现为一个 504（网关会把上游超时/不可达映射成 504/502，不会抛裸异常）。之后该失败被缓存、不再重复。解法是设 `HF_ENDPOINT=https://hf-mirror.com` 让模型落地，或部署后先手动打一次 `/v1/experiences/search` 预热。
 
@@ -333,5 +354,65 @@ ruff check curated tests/curated --line-length 120
 - 不提供 `DELETE`/`PUT`：删除会破坏 `supersedes` 链。
 - 只支持单一 embedder 维度；更换模型需重建集合。
 - 未接入 graph memory 与 reranker。
-- MCP 桥按 `2024-11-05` 基线实现，验证方式是子进程 + 手写 JSON-RPC 驱动（协议握手、四个 tool、UTF-8、错误透传全过，并对着容器化 gateway 跑通了「Curator 中文写入 → Worker 中文检索 → dedup → deprecate 后消失」整链路）；**尚未由 Qoder / CodeBuddy 客户端实机连接验证过**，两侧的 mcpServers 片段照各自官方字段写的。
+- MCP 桥按 `2024-11-05` 基线实现，验证方式是子进程 + 手写 JSON-RPC 驱动（协议握手、四个 tool、UTF-8、错误透传全过，并对着容器化 gateway 跑通了「Curator 中文写入 → Worker 中文检索 → dedup → deprecate 后消失」整链路）。Qoder 侧已实机跑通检索与写入；CodeBuddy 侧已实机跑通：`~/.codebuddy/mcp.json` 里的配置重启后被 MCP 面板识别（`curated-read`，4 tools，连接正常），并从任意 `cwd` 起进程验证了 `initialize` / `tools/list` 与一次真实检索。豆包 PC 版走同一个 STDIO 连接器，入口与参数按官方帮助配置，**尚未实机验证**。
 - compose 里 Qdrant 固定在 `v1.12.4`，而镜像装的 `qdrant-client` 是 1.20，启动会打一条版本兼容性 warning。功能实测正常（payload 过滤、`must_not` 语义都对），但**升这个 pin 之前要重跑一遍 `tests/curated` 和 `./deploy.sh smoke`**——过滤语义靠的是 client/server 对 payload 条件的一致理解。
+
+## 10. 自动沉淀（每 30 分钟）
+
+前 9 节的所有写入都由人触发。自动沉淀补的是「任务干完了但没说要沉淀」这一段：定时任务每 30 分钟起来一次，读取对话的脱敏摘要，由模型判断是否值得入库，通过机器门禁后写入共享库。判断归模型，约束归代码。来源有两条：Qoder 的全量转录（全自动），和 CodeBuddy 主动投放的轨迹（半自动，见本节末尾）。
+
+```
+~/.qoder/projects/*/<session>.jsonl      Qoder，全自动
+~/.codebuddy/curated-inbox/*.jsonl       CodeBuddy，agent 主动投放
+        │  scan：流式读尾部，脱敏 + 去代码 + 去工具正文
+        ▼
+   摘要（≤ 8 KB；长会话可用 --session 按段切分）
+        │  定时会话里的模型判断
+        ▼
+   record JSON  ──write──▶ 门禁 → 幂等 → dedup → 网关 → 经验库
+```
+
+命令行（在仓库根目录，用 MCP 那个精简 venv 即可，不依赖 pydantic）：
+
+```bash
+PY=~/.venvs/mem0-curated-mcp/bin/python
+$PY -m curated.auto.cli scan --limit 2          # 输出候选摘要 JSON
+$PY -m curated.auto.cli write --key '<path>'    # 从 stdin 读一条 record
+$PY -m curated.auto.cli finalize --key '<path>' # 关闭 --keep 打开的候选
+$PY -m curated.auto.cli mark --key '<path>' --reason one_off
+```
+
+**一个会话可以沉淀多条经验。** 常规 `scan` 只给会话尾部一段摘要（回答「最后发生了什么」）；长会话的早期与中段需要按会话切分，每段独立成候选：
+
+```bash
+$PY -m curated.auto.cli scan --session <id 前缀或完整路径> --segments 6 --limit 4
+```
+
+候选 key 是虚拟的 `<path>::seg-N`，与每文件的常规游标互不干扰，不会把定时扫描的 offset 拉回去。每段摘要 ≤ 8 KB，工具事件折叠成 `TOOLS ok=.. error=..`，主题按时间顺序尽量均匀切分；段数会根据文本量自动收敛（短会话仍是 1 段），最多 12 段。
+
+同一段摘要里若确实存在互不重叠的多个主题（工作流习惯、踩坑、配置约束），用 `--keep` 连续写，最后 `finalize` 提交：
+
+```bash
+$PY -m curated.auto.cli write --key '<key>' --keep   # 每条都加 --keep
+$PY -m curated.auto.cli write --key '<key>' --keep
+$PY -m curated.auto.cli finalize --key '<key>'       # 推进游标，审计里记录所有 id
+```
+
+单候选最多 4 条（第 5 条返回 `cap_reached`）；只写一条时不用 `--keep`，`write` 自动提交。判断标准与硬性红线写在 [`prompts/auto_curator.md`](prompts/auto_curator.md)，`write` 的门禁按顺序是：字段完整性 → 密钥扫描 → 代码气味 → 置信度封顶（`verified` 0.8 / `error_then_fixed` 0.65 / 其余 0.5）→ 幂等 → 去重。幂等键是 `会话 + 摘要哈希 + 本条 summary 哈希`：同一段摘要重跑同一结论会被挡住，同一摘要里的不同主题、同一会话的后续新主题都能各自入库——否则长会话终生只能写一条。去重分数 ≥ 0.9 直接跳过；0.75–0.9 只是"相关"，自动链路**永不** `supersede`——候选带 `auto` 标签时作为独立条目新增并在审计里记 `near_duplicate`，撞上人工条目则跳过并留审计记录。废弃旧条目必须人工裁决：向量相似度分不清"同一结论"和"只是都在谈门禁"。自动写入的条目固定带 `auto` + `unreviewed` 标签，看板按标签筛出来复核即可。
+
+**状态与配置**（都在 `~/.qoder/curated/`，目录 0700、文件 0600）：
+
+| 文件 | 作用 |
+|---|---|
+| `auto-cursor.json` | 每个转录的 offset / size / mtime / 待处理摘要，只有写入或显式跳过后才推进；深扫候选用 `<path>::seg-N` 虚拟键，不影响常规游标 |
+| `auto-config.json` | 可选：`exclude_workspaces`（按目录 slug 子串排除）、`max_per_run`、`max_read_bytes`、`inbox_dir`（单个路径或数组，覆盖默认的两个投放目录，调试用） |
+| `auto-log.jsonl` | 每次 write / mark 的结果与原因，出问题先看这里 |
+| `auto.lock` | 防止两次定时任务重叠；45 分钟视为陈旧可接管 |
+
+首次运行只把现有转录的游标种子到文件末尾，避免一次性回灌历史。要回放历史会话用 `scan --backfill --limit 2`，分批跑；加 `--backfill-days 7` 只回放最近一周，更早的文件保持种子状态（不带这个参数时仍可手动全量回放）。停用方式：删掉或禁用 Qoder 里的定时任务；已经入库的条目不会被自动删除，按 `auto` 标签清理即可。
+
+CLI 的网关地址、curator key、project 从环境变量读取；缺省时回退读 `~/.qoder/settings.json` 里 `mcpServers.curated-curator.env`，不额外落一份密钥。Worker 会话仍然只读——写入只发生在定时任务与 CLI 进程内。
+
+**CodeBuddy / 豆包走半自动投放。** 两者都把对话正文放在服务端。CodeBuddy CN 1.106.1 本地只有 `message-queue/*.json`（仅用户输入队列，没有助手回复和工具结果）、`edit-sessions/<conversationId>.json` 与 `file-changes/<conversationId>/*.json`（文件改动）、`todos` / `plans` / `brain/<hash>/*.md`（任务与笔记），以及只存 `current.json` 指针的空 `conversations/<id>/` 目录——没有可扫描的转录正文。所以留了投放目录：CodeBuddy 用 `~/.codebuddy/curated-inbox/`，豆包用 `~/.doubao/curated-inbox/`（`auto-config.json` 的 `inbox_dir` 可覆盖，支持传数组）。客户端侧规则（样例 [`prompts/codebuddy_trajectory.md`](prompts/codebuddy_trajectory.md)，**尚未安装**）让 agent 在任务收尾时把脱敏轨迹写成 JSONL，行类型是 `meta` / `user` / `assistant` / `tool`（只记工具名与 `ok`/`error`）/ `verification`，格式与客户端无关。`scan` 把这两个目录当第二来源，候选里用 `source: "inbox"` 标出；只认各目录直接层的 `*.jsonl`，按 `meta.workspace` 套 `exclude_workspaces`，其余脱敏、摘要、门禁、幂等、去重与 Qoder 同一套。轨迹是 agent 自己写的，只能信任它格式合法、不能信任它内容安全，所以脱敏在扫描时重做一遍；入库后同样带 `auto` + `unreviewed`。
+
+半自动的代价是覆盖率取决于投放行为。衡量方式：取一周内两个投放目录的文件数 ÷ 同一周实际完成的对应客户端会话数；偏低就调规则里的触发条件，不要靠多写凑数。跑通验证：把手写样例 [`examples/inbox_trajectory.jsonl`](examples/inbox_trajectory.jsonl) 放进投放目录（用 `auto-config.json` 的 `inbox_dir` 指到临时目录即可，别动真实状态），先 `scan --limit 1` 让首次运行种子，再 `scan --limit 1 --backfill`，应返回 `source: inbox`、`evidence: error_then_fixed`。
