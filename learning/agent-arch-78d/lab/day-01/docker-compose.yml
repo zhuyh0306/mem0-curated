@@ -1,0 +1,205 @@
+name: agent-lab-day01
+
+# Day 1 baseline: one command brings up Postgres, Redis, Qdrant, LiteLLM and
+# Langfuse. Langfuse v3 needs ClickHouse and S3 itself, so those two come along
+# even though they are not in the day's five-service list.
+#
+# Host ports 9000/9001 are already taken by an SSH forward on this machine, so
+# MinIO is published on 19000/19001.
+
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/postgres
+  REDIS_CONNECTION_STRING: redis://redis:6379
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 384m
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 192m
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    mem_limit: 384m
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "clickhouse", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+
+  minio:
+    # docker.io/minio/minio is blocked by the local registry mirrors and quay
+    # answers 401 to anonymous HEAD requests, so this uses the Chainguard build
+    # that is already present on the machine.
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    volumes:
+      - minio_data:/data
+    mem_limit: 192m
+
+  minio-init:
+    # No minio/mc on this machine either; boto3 ships inside the LiteLLM image.
+    image: ghcr.io/berriai/litellm:main-stable
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["python", "/init.py"]
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+    volumes:
+      - ./minio_init.py:/init.py:ro
+    restart: "no"
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *langfuse-env
+      SALT: ${LANGFUSE_SALT:?set LANGFUSE_SALT in .env}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set LANGFUSE_ENCRYPTION_KEY in .env}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?set LANGFUSE_NEXTAUTH_SECRET in .env}
+      NEXTAUTH_URL: http://localhost:3000
+      LANGFUSE_INIT_ORG_ID: agent-lab
+      LANGFUSE_INIT_ORG_NAME: agent-lab
+      LANGFUSE_INIT_PROJECT_ID: agent-lab
+      LANGFUSE_INIT_PROJECT_NAME: agent-lab
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?set LANGFUSE_PUBLIC_KEY in .env}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?set LANGFUSE_SECRET_KEY in .env}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:?set LANGFUSE_ADMIN_PASSWORD in .env}
+      NODE_OPTIONS: --max-old-space-size=1024
+    ports:
+      - "3000:3000"
+    mem_limit: 1536m
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *langfuse-env
+      SALT: ${LANGFUSE_SALT:?set LANGFUSE_SALT in .env}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set LANGFUSE_ENCRYPTION_KEY in .env}
+      NODE_OPTIONS: --max-old-space-size=768
+    mem_limit: 1024m
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    depends_on:
+      langfuse-web:
+        condition: service_started
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?set LANGFUSE_PUBLIC_KEY in .env}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?set LANGFUSE_SECRET_KEY in .env}
+      LANGFUSE_HOST: http://langfuse-web:3000
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 768m
+
+volumes:
+  pg_data:
+  qdrant_data:
+  clickhouse_data:
+  minio_data:

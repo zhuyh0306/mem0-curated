@@ -1,0 +1,16 @@
+model_list:
+  # Day 1 only needs one route: a local Ollama model, so the smoke test needs no
+  # cloud key. Day 16 adds the fast/strong split on top of this entry.
+  - model_name: fast
+    litellm_params:
+      model: ollama/qwen2.5:0.5b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 4096
+
+litellm_settings:
+  drop_params: true
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
