@@ -91,6 +91,16 @@ def list_experiences(
 
 
 @app.get(
+    "/v1/projects",
+    response_model=list[str],
+    summary="List project ids that already have records",
+    dependencies=INTERNAL_ONLY,
+)
+def list_projects(service: ExperienceService = Depends(get_service)):
+    return service.list_projects()
+
+
+@app.get(
     "/v1/experiences/{memory_id}",
     response_model=ExperienceResult,
     summary="Read one curated experience record",

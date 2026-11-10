@@ -64,6 +64,34 @@ def make_record(**overrides: Any) -> ExperienceRecord:
     return ExperienceRecord(**payload)
 
 
+def test_list_projects_is_empty_before_any_write(service: ExperienceService) -> None:
+    assert service.list_projects() == []
+
+
+def test_list_projects_returns_distinct_sorted_ids(service: ExperienceService) -> None:
+    service.create(make_record(), "proj-b")
+    service.create(make_record(summary="second record same project"), "proj-a")
+    service.create(make_record(summary="third record same project"), "proj-a")
+
+    assert service.list_projects() == ["proj-a", "proj-b"]
+
+
+def test_projects_route_is_internal_only(service: ExperienceService, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from curated.app import main as app_main
+
+    monkeypatch.setenv("INTERNAL_TOKEN", "tok-test")
+    monkeypatch.setattr(app_main, "_service", service)
+    client = TestClient(app_main.app)
+
+    assert client.get("/v1/projects").status_code == 401
+    service.create(make_record(), "proj-a")
+    response = client.get("/v1/projects", headers={"x-internal-token": "tok-test"})
+    assert response.status_code == 200
+    assert response.json() == ["proj-a"]
+
+
 def test_create_stores_record_and_hides_nothing(service: ExperienceService) -> None:
     created = service.create(make_record(), "proj-a")
 

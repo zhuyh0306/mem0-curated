@@ -257,7 +257,8 @@
   <div class="spacer"></div>
   <div class="project-wrap">
     <label for="project">项目</label>
-    <input id="project" spellcheck="false" autocomplete="off">
+    <input id="project" list="project-options" spellcheck="false" autocomplete="off">
+    <datalist id="project-options"></datalist>
   </div>
   <button class="btn" id="refresh">刷新</button>
   <button class="btn primary" id="new-record">新建经验</button>
@@ -534,6 +535,15 @@ function renderRows() {
   }).join('');
 }
 
+async function loadProjects() {
+  try {
+    const projects = await api('/api/projects');
+    $('#project-options').innerHTML = projects.map((p) => `<option value="${esc(p)}"></option>`).join('');
+  } catch (err) {
+    // Candidates are a convenience: if the endpoint fails the box still accepts free text.
+  }
+}
+
 async function load() {
   setBusy(true);
   try {
@@ -758,6 +768,7 @@ async function submitCreate(event) {
     $('#create-dialog').close();
     toast('已写入');
     await load();
+    await loadProjects();
   } catch (err) {
     errorBox.hidden = false;
     errorBox.textContent = err.message;
@@ -898,6 +909,7 @@ function bind() {
   } catch (err) {
     toast(err.message, 'error');
   }
+  await loadProjects();
   await load();
 })();
 </script>

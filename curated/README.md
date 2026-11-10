@@ -219,6 +219,8 @@ QDRANT_IMAGE=ghcr.io/<owner>/mem0-curated-qdrant:v1.12.4 \
 | POST | `/v1/experiences/search` | ✅ | ✅ |
 | POST | `/v1/experiences/dedup-check` | ✅ | ✅ |
 | GET | `/v1/experiences/{id}?project_id=` | ✅ | ✅ |
+| GET | `/v1/experiences?project_id=` | 403 | ✅ 列表 |
+| GET | `/v1/projects` | ✅ | ✅ 已有记录的项目名 |
 | POST | `/v1/experiences/{id}/deprecate` | 403 | ✅ |
 | POST | `/mem0/search` | ✅ | ✅ |
 | GET | `/mem0/memories?project_id=` | ✅ | ✅ |
@@ -237,6 +239,7 @@ QDRANT_IMAGE=ghcr.io/<owner>/mem0-curated-qdrant:v1.12.4 \
 | 能力 | 说明 |
 |---|---|
 | 浏览与统计 | 记录数、生效/废弃数、标签分布，按标签筛选 |
+| 项目切换 | 输入框挂 `datalist`，候选来自 `GET /v1/projects`；仍可手输尚未存在的项目 |
 | 语义搜索 | 走 `/v1/experiences/search`，与 Agent 检索同一套排序 |
 | 详情 | 完整记录、失败尝试、`supersedes` / `superseded_by` 链 |
 | 新建 | 表单按 Schema 校验，保存前自动查重；发现相似条目需二次确认 |

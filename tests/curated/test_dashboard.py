@@ -53,6 +53,23 @@ def test_records_are_listed_through_the_gateway_with_the_curator_key(client) -> 
     assert seen["key"] == CURATOR_KEY
 
 
+def test_projects_are_listed_through_the_gateway_with_the_curator_key(client) -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["key"] = request.headers.get("x-api-key")
+        return httpx.Response(200, json=["proj-a", "proj-b"])
+
+    mock_gateway(handler)
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    assert response.json() == ["proj-a", "proj-b"]
+    assert seen["path"] == "/v1/projects"
+    assert seen["key"] == CURATOR_KEY
+
+
 def test_create_forwards_the_record_body(client) -> None:
     seen = {}
 

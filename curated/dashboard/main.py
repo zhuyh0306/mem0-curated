@@ -89,6 +89,11 @@ def config() -> Dict[str, Any]:
     return {"project_id": DEFAULT_PROJECT, "writable": bool(API_KEY), "gateway": GATEWAY_URL}
 
 
+@app.get("/api/projects")
+async def list_projects() -> JSONResponse:
+    return await call_gateway("GET", "/v1/projects")
+
+
 @app.get("/api/records")
 async def list_records(
     project_id: str = Query(..., min_length=1),

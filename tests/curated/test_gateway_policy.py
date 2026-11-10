@@ -33,6 +33,12 @@ def test_worker_can_read_and_search() -> None:
     assert policy.is_allowed("worker", "POST", "/v1/experiences/search") is True
     assert policy.is_allowed("worker", "POST", "/v1/experiences/dedup-check") is True
     assert policy.is_allowed("worker", "GET", "/v1/experiences/abc") is True
+    assert policy.is_allowed("worker", "GET", "/v1/projects") is True
+
+
+def test_worker_projects_path_with_suffix_is_denied() -> None:
+    assert policy.is_allowed("worker", "GET", "/v1/projects/extra") is False
+    assert policy.is_allowed("worker", "POST", "/v1/projects") is False
 
 
 def test_worker_search_path_with_suffix_is_denied() -> None:

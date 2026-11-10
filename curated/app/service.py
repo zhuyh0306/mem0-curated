@@ -158,6 +158,32 @@ class ExperienceService:
     def list_memories(self, project_id: str, top_k: int) -> Dict[str, Any]:
         return self.memory.get_all(filters={"user_id": project_id}, top_k=top_k)
 
+    def list_projects(self, scan_limit: int = 5000) -> List[str]:
+        # mem0 get_all refuses filters without an entity id, so enumerating projects has to
+        # scroll the payload directly instead of going through the scoped listing helpers.
+        client = getattr(self.memory.vector_store, "client", None)
+        if client is None:
+            return []
+        projects = set()
+        offset = None
+        scanned = 0
+        while scanned < scan_limit:
+            points, offset = client.scroll(
+                collection_name=self.memory.collection_name,
+                limit=min(256, scan_limit - scanned),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            scanned += len(points)
+            for point in points:
+                project_id = (point.payload or {}).get("user_id")
+                if project_id:
+                    projects.add(project_id)
+            if offset is None:
+                break
+        return sorted(projects)
+
     def list_experiences(
         self,
         project_id: str,

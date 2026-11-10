@@ -9,6 +9,7 @@ Rule = Tuple[str, Pattern[str]]
 # "a Worker can never write" a property of the code rather than a property of today's route table.
 _WORKER_RULES: List[Rule] = [
     ("GET", re.compile(r"^/health$")),
+    ("GET", re.compile(r"^/v1/projects$")),
     ("GET", re.compile(r"^/v1/experiences/[^/]+$")),
     ("POST", re.compile(r"^/v1/experiences/search$")),
     ("POST", re.compile(r"^/v1/experiences/dedup-check$")),
